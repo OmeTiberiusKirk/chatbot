@@ -287,7 +287,9 @@ async def main():
 
     chunks, texts, tfidf_vec, tfidf_mat = await build_index(pdf_path)
 
-    q = "สรุป tor ให้หน่อยครับ"
+    # q = "สรุป tor กระทรวงคมนาคมให้หน่อย"
+    # q = "tor ของกระทรวงคมนาคมมีกี่ฉบับ"
+    q = "โครงการที่มีตอนนี้เป็นของที่ไหน"
     results = await retrieve(q, tfidf_vec, tfidf_mat, texts)
 
     print("\n--- Retrieved Chunks ---")
