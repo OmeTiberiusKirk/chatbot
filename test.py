@@ -34,6 +34,7 @@ TOP_K = 5
 CANDIDATE_MULT = 4
 ALPHA = 0.6
 NOT_FOUND_THRESHOLD = 0.12
+FILE_NAME = "tor2.pdf"
 
 
 # -----------------------------
@@ -54,20 +55,20 @@ def clean_thai_text(text: str) -> str:
 # -----------------------------
 # Chunking
 # -----------------------------
-def extract_pdf_pages(pdf_path: str):
+def extract_pdf(pdf_path: str):
     reader = PdfReader(pdf_path)
     pages = []
-    for i, page in enumerate(reader.pages, start=1):
+    for _, page in enumerate(reader.pages):
         t = page.extract_text() or ""
         t = clean_thai_text(t)
-        pages.append((i, t))
+        pages.append(t)
     return pages
 
 
 def chunk_pages(pages):
     chunks = []
     chunk_id = 0
-    for pageno, text in pages:
+    for text in pages:
         words = text.split()
         i = 0
         while i < len(words):
@@ -76,8 +77,8 @@ def chunk_pages(pages):
 
             if chunk_text:
                 chunks.append({
-                    "chunk_id": f"{pageno}-{chunk_id}",
-                    "page": pageno,
+                    "file_name": FILE_NAME,
+                    "chunk_id": f"{FILE_NAME}-{chunk_id}",
                     "text": chunk_text
                 })
                 chunk_id += 1
@@ -122,8 +123,8 @@ async def init_db(dim: int):
     await conn.execute(f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         id SERIAL PRIMARY KEY,
+        file_name TEXT,
         chunk_id TEXT UNIQUE,
-        page INT,
         text TEXT,
         embedding VECTOR({dim})
     );
@@ -140,14 +141,14 @@ async def init_db(dim: int):
 async def insert_chunks(chunks, embeddings):
     conn = await asyncpg.connect(**DB_CONFIG)
     records = [
-        (c["chunk_id"], c["page"], c["text"], to_pgvector(emb))
+        (c["file_name"], c["chunk_id"], c["text"], to_pgvector(emb))
         for c, emb in zip(chunks, embeddings)
     ]
     await conn.executemany(
-        f"""INSERT INTO {TABLE_NAME} (chunk_id, page, text, embedding)
+        f"""INSERT INTO {TABLE_NAME} (file_name, chunk_id, text, embedding)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (chunk_id)
-            DO UPDATE SET page=EXCLUDED.page, text=EXCLUDED.text, embedding=EXCLUDED.embedding;""",
+            DO UPDATE SET file_name=EXCLUDED.file_name, text=EXCLUDED.text, embedding=EXCLUDED.embedding;""",
         records
     )
     await conn.close()
@@ -156,7 +157,7 @@ async def insert_chunks(chunks, embeddings):
 async def search_candidates(query_emb):
     conn = await asyncpg.connect(**DB_CONFIG)
     rows = await conn.fetch(
-        f"""SELECT chunk_id, page, text, embedding
+        f"""SELECT file_name, chunk_id, text, embedding
             FROM {TABLE_NAME}
             ORDER BY embedding <-> $1
             LIMIT $2;""",
@@ -215,8 +216,8 @@ async def retrieve(query, tfidf_vec, tfidf_matrix, chunks_texts):
     for idx in idx_top:
         r = rows[idx]
         results.append({
+            "file_name": r["file_name"],
             "chunk_id": r["chunk_id"],
-            "page": r["page"],
             "text": r["text"],
             "score": float(hybrid[idx])
         })
@@ -232,7 +233,7 @@ async def answer_question(question, top_chunks):
         return "Not found in document."
 
     context = "\n\n---\n\n".join(
-        [f"[page {c['page']}] {c['text']}" for c in top_chunks]
+        [f"[file_name {c['file_name']}] {c['text']}" for c in top_chunks]
     )
 
     prompt = f"""
@@ -251,7 +252,7 @@ QUESTION:
 # Full build index
 # -----------------------------
 async def build_index(pdf_path):
-    pages = extract_pdf_pages(pdf_path)
+    pages = extract_pdf(pdf_path)
     chunks = chunk_pages(pages)
 
     # determine embedding dim from first chunk
@@ -283,13 +284,10 @@ def to_pgvector(vec):
 # MAIN
 # -----------------------------
 async def main():
-    pdf_path = "tor.pdf"
 
-    chunks, texts, tfidf_vec, tfidf_mat = await build_index(pdf_path)
+    chunks, texts, tfidf_vec, tfidf_mat = await build_index(FILE_NAME)
 
-    # q = "สรุป tor กระทรวงคมนาคมให้หน่อย"
-    # q = "tor ของกระทรวงคมนาคมมีกี่ฉบับ"
-    q = "โครงการที่มีตอนนี้เป็นของที่ไหน"
+    q = "สรุป tor กระทรวงคมนาคมให้หน่อย"
     results = await retrieve(q, tfidf_vec, tfidf_mat, texts)
 
     print("\n--- Retrieved Chunks ---")
