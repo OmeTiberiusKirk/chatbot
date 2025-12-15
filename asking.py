@@ -2,10 +2,11 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 from dataclasses import asdict
-import numpy as np
-from retrieval import DB_CONFIG, TABLE_NAME, ollama_embed, ollama_generate, to_pgvector
+import ollama
+from retrieval import DB_CONFIG, TABLE_NAME, LLM_MODEL, ollama_embed, to_pgvector
 import asyncpg
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 
 @dataclass
@@ -66,6 +67,33 @@ async def search_candidates(query_emb: float, filter: Meta):
     return rows
 
 # -----------------------------
+# Async Ollama
+# -----------------------------
+_executor = ThreadPoolExecutor()
+
+
+async def ollama_generate(prompt: str, model=LLM_MODEL):
+    def _run():
+        messages = [
+            {
+                "role": "system",
+                "content": "คุณเป็นผู้ช่วยที่ตอบเป็นภาษาไทยเท่านั้น"
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        resp = ollama.chat(model=model, messages=messages)
+        return resp.message
+        # return ollama.generate(model=model, prompt=prompt)
+
+    loop = asyncio.get_event_loop()
+    resp = await loop.run_in_executor(_executor, _run)
+    return resp.get("content") or ""
+
+
+# -----------------------------
 # Generate answer
 # -----------------------------
 
@@ -92,18 +120,9 @@ async def answer_question(question, top_chunks):
     return (await ollama_generate(prompt)).strip()
 
 
-# -----------------------------
-# TF-IDF
-# -----------------------------
-def cosine(a, b):
-    a = np.array(a, dtype=float)
-    b = np.array(json.loads(b), dtype=float)
-    return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
-
-
 async def main():
-    q = "วงเงินในการจัดหา"
-    results = await retrieve(q, Meta(department="มหาวิทยาลัยราชภัฏวไลยอลงกรณ"))
+    q = "21 ระบบ มีระบบอะไรบ้าง"
+    results = await retrieve(q, Meta(department="ปลัดกระทรวงคมนาคม"))
     print(results)
 
     print("\n--- Retrieved Chunks ---")

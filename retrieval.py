@@ -29,35 +29,36 @@ TABLE_NAME = "tors"
 CHUNK_SIZE = 400
 CHUNK_OVERLAP = 60
 EMBED_MODEL = "nomic-embed-text"
-LLM_MODEL = "llama3.1"
+LLM_MODEL = "qwen2.5"
 
-# FILE_NAME = "tor1.pdf"
-# METADATA = {
-#     "title": "ขอบเขตของงาน (Terms of Reference : TOR จ้างบริการบำรุงรักษาและซ่อมแซมแก้ไขระบบงานอิเล็กทรอนิกส์",
-#     "department": "ปลัดกระทรวงคมนาคม",
-#     "year": 2024,
-#     "source": "tor1.pdf"
-# }
-
-FILE_NAME = "tor2.pdf"
+FILE_NAME = "tor1.pdf"
 METADATA = {
-    "title": "ขอบเขตของงาน (Terms Of Reference : TOR) จ้างพัฒนาระบบคลังข้อสอบและชุดข้อสอบเพื่อประเมินสมิทธิภาพทางภาษาอังกฤษ",
-    "department": "มหาวิทยาลัยราชภัฏวไลยอลงกรณ",
+    "title": "ขอบเขตของงาน (Terms of Reference : TOR จ้างบริการบำรุงรักษาและซ่อมแซมแก้ไขระบบงานอิเล็กทรอนิกส์",
+    "department": "ปลัดกระทรวงคมนาคม",
     "year": 2024,
-    "source": "tor2.pdf"
+    "source": "tor1.pdf"
 }
+
+# FILE_NAME = "tor2.pdf"
+# METADATA = {
+#     "title": "ขอบเขตของงาน (Terms Of Reference : TOR) จ้างพัฒนาระบบคลังข้อสอบและชุดข้อสอบเพื่อประเมินสมิทธิภาพทางภาษาอังกฤษ",
+#     "department": "มหาวิทยาลัยราชภัฏวไลยอลงกรณ",
+#     "year": 2024,
+#     "source": "tor2.pdf"
+# }
 
 # -----------------------------
 # Thai cleanup
 # -----------------------------
-THAI_MARKS = "่้๊๋ิีึืุูั็์ํ"
+THAI_MARKS = "่้๊๋ิีึืุูั็์ํเาะโไแใ์ำ"
 
 
 def clean_thai_text(text: str) -> str:
     text = text.replace("\u00a0", " ").replace("\u200b", "")
     text = re.sub(r"([ก-ฮ])\s+([ก-ฮ])", r"\1\2", text)
-    text = re.sub(r"([ก-ฮ])\s([' + THAI_MARKS + '])", r"\1\2", text)
-    text = re.sub(r"([' + THAI_MARKS + '])\s([ก-ฮ])", r"\1\2", text)
+    text = re.sub(rf"([ก-ฮ])\s([{THAI_MARKS}])", r"\1\2", text)
+    text = re.sub(rf"({THAI_MARKS}])\s([ก-ฮ])", r"\1\2", text)
+    text = re.sub(rf"({THAI_MARKS}])\s([{THAI_MARKS}])", r"\1\2", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
@@ -141,15 +142,6 @@ async def ollama_embed(text: str, model=EMBED_MODEL) -> list[float]:
     if isinstance(vec, list) and isinstance(vec[0], list):
         return vec[0]
     return vec
-
-
-async def ollama_generate(prompt: str, model=LLM_MODEL):
-    def _run():
-        return ollama.generate(model=model, prompt=prompt)
-
-    loop = asyncio.get_event_loop()
-    resp = await loop.run_in_executor(_executor, _run)
-    return resp.get("response") or ""
 
 
 # -----------------------------
