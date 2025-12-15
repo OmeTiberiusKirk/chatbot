@@ -26,28 +26,26 @@ DB_CONFIG = {
 }
 
 TABLE_NAME = "tors"
-CHUNK_SIZE = 350
-CHUNK_OVERLAP = 80
-EMBED_MODEL = "mxbai-embed-large"
-LLM_MODEL = "llama3.2"
-TOP_K = 5
-CANDIDATE_MULT = 4
-ALPHA = 0.6
-NOT_FOUND_THRESHOLD = 0.12
-FILE_NAME = "tor1.pdf"
-METADATA = {
-    "title": "ขอบเขตของงาน (Terms of Reference : TOR จ้างบริการบำรุงรักษาและซ่อมแซมแก้ไขระบบงานอิเล็กทรอนิกส์",
-    "department": "ปลัดกระทรวงคมนาคม",
-    "year": 2024,
-    "source": "tor1.pdf"
-}
-# FILE_NAME = "tor2.pdf"
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 60
+EMBED_MODEL = "nomic-embed-text"
+LLM_MODEL = "llama3.1"
+
+# FILE_NAME = "tor1.pdf"
 # METADATA = {
-#     "title": "ขอบเขตของงาน (Terms Of Reference : TOR) เรื่อง จ้างพัฒนาระบบคลังข้อสอบและชุดข้อสอบเพื่อประเมินสมิทธิภาพทางภาษาอังกฤษ",
-#     "department": "มหาวิทยาลัยราชภัฏวไลยอลงกรณ",
+#     "title": "ขอบเขตของงาน (Terms of Reference : TOR จ้างบริการบำรุงรักษาและซ่อมแซมแก้ไขระบบงานอิเล็กทรอนิกส์",
+#     "department": "ปลัดกระทรวงคมนาคม",
 #     "year": 2024,
-#     "source": "tor2.pdf"
+#     "source": "tor1.pdf"
 # }
+
+FILE_NAME = "tor2.pdf"
+METADATA = {
+    "title": "ขอบเขตของงาน (Terms Of Reference : TOR) จ้างพัฒนาระบบคลังข้อสอบและชุดข้อสอบเพื่อประเมินสมิทธิภาพทางภาษาอังกฤษ",
+    "department": "มหาวิทยาลัยราชภัฏวไลยอลงกรณ",
+    "year": 2024,
+    "source": "tor2.pdf"
+}
 
 # -----------------------------
 # Thai cleanup
@@ -89,7 +87,8 @@ def thai_sentence_split(text: str):
 # -----------------------------
 # Chunking
 # -----------------------------
-def extract_pdf(pdf_path: str) -> tuple[int, str]:
+def extract_pdf(pdf_path: str) -> list[tuple[int, str]]:
+    # -- coding: utf-8 -- #
     reader = PdfReader(pdf_path)
     pages = []
     for pageno, page in enumerate(reader.pages):
@@ -99,7 +98,7 @@ def extract_pdf(pdf_path: str) -> tuple[int, str]:
     return pages  # list of (page_number, text_of_page)
 
 
-def chunk_texts(pages: list[str]):
+def chunk_texts(pages: list[tuple[int, str]]):
     chunks = []
     chunk_id = 0
     for pageno, text in pages:
@@ -131,7 +130,7 @@ def chunk_texts(pages: list[str]):
 _executor = ThreadPoolExecutor()
 
 
-async def ollama_embed(text: str, model=EMBED_MODEL):
+async def ollama_embed(text: str, model=EMBED_MODEL) -> list[float]:
     def _run():
         return ollama.embed(model=model, input=text)
 
@@ -196,102 +195,6 @@ async def insert_chunks(chunks, embeddings):
     await conn.close()
 
 
-async def search_candidates(query_emb):
-    conn = await asyncpg.connect(**DB_CONFIG)
-    rows = await conn.fetch(
-        f"""SELECT file_name, chunk_id, text, embedding
-            FROM {TABLE_NAME}
-            ORDER BY embedding <-> $1
-            LIMIT $2;""",
-        to_pgvector(query_emb),
-        TOP_K * CANDIDATE_MULT,
-    )
-    await conn.close()
-    return rows
-
-
-# -----------------------------
-# TF-IDF
-# -----------------------------
-def cosine(a, b):
-    a = np.array(a, dtype=float)
-    b = np.array(json.loads(b), dtype=float)
-    return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
-
-
-# -----------------------------
-# Retrieval + Rerank
-# -----------------------------
-async def retrieve(query, tfidf_vec, tfidf_matrix, chunks_texts):
-    q_emb = await ollama_embed(query)
-
-    rows = await search_candidates(q_emb)
-    if not rows:
-        return []
-
-    texts = [r["text"] for r in rows]
-    embs = [r["embedding"] for r in rows]
-
-    # lexical
-    q_tfidf = tfidf_vec.transform([query])
-    cand_tfidf = tfidf_vec.transform(texts)
-    lex_sims = (q_tfidf @ cand_tfidf.T).toarray()[0]
-
-    # embedding similarity
-    emb_sims = np.array([cosine(q_emb, e) for e in embs])
-
-    # normalize 0..1
-    def norm(x):
-        x = np.array(x)
-        if x.max() - x.min() < 1e-9:
-            return np.ones_like(x)
-        return (x - x.min()) / (x.max() - x.min())
-
-    emb_n = norm(emb_sims)
-    lex_n = norm(lex_sims)
-    hybrid = ALPHA * emb_n + (1 - ALPHA) * lex_n
-
-    # pick top-k
-    idx_top = np.argsort(hybrid)[::-1][:TOP_K]
-
-    results = []
-    for idx in idx_top:
-        r = rows[idx]
-        results.append(
-            {
-                "file_name": r["file_name"],
-                "chunk_id": r["chunk_id"],
-                "text": r["text"],
-                "score": float(hybrid[idx]),
-            }
-        )
-
-    return results
-
-
-# -----------------------------
-# Generate answer
-# -----------------------------
-async def answer_question(question, top_chunks):
-    if not top_chunks or top_chunks[0]["score"] < NOT_FOUND_THRESHOLD:
-        return "Not found in document."
-
-    context = "\n\n---\n\n".join(
-        [f"[file_name {c['file_name']}] {c['text']}" for c in top_chunks]
-    )
-
-    prompt = f"""
-    ตอบคำถามโดยใช้เฉพาะข้อมูลจาก CONTEXT ถ้าไม่พบให้ตอบว่า "Not found in document."
-
-    CONTEXT:
-    {context}
-
-    QUESTION:
-    {question}
-    """
-    return (await ollama_generate(prompt)).strip()
-
-
 # -----------------------------
 # Full build index
 # -----------------------------
@@ -300,8 +203,8 @@ async def build_index(pdf_path):
     print(f"Loaded {len(pages)} pages")
 
     chunks = chunk_texts(pages)
+    print(chunks)
     print(f"Created {len(chunks)} chunks")
-
 
     # determine embedding dim from first chunk
     emb0 = await ollama_embed(chunks[0]["text"])
@@ -334,17 +237,6 @@ def to_pgvector(vec):
 # -----------------------------
 async def main():
     chunks, texts, tfidf_vec, tfidf_mat = await build_index(FILE_NAME)
-
-    # q = "สรุป TOR ของมหาวิทยาลัยราชภัฏวไลยอลงกร"
-    # results = await retrieve(q, tfidf_vec, tfidf_mat, texts)
-
-    # print("\n--- Retrieved Chunks ---")
-    # for r in results:
-    #     print(r["chunk_id"], r["score"])
-    #     print(r["text"][:200], "\n")
-
-    # ans = await answer_question(q, results)
-    # print("\nAnswer:", ans)
 
 
 if __name__ == "__main__":
