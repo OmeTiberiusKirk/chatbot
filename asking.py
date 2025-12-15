@@ -61,7 +61,7 @@ async def search_candidates(query_emb: float, filter: Meta):
             LIMIT $3;""",
         to_pgvector(query_emb),
         json.dumps(filter_dict),
-        TOP_K * CANDIDATE_MULT
+        TOP_K
     )
     await conn.close()
     return rows
@@ -121,7 +121,7 @@ async def answer_question(question, top_chunks):
 
 
 async def main():
-    q = "21 ระบบ มีระบบอะไรบ้าง"
+    q = "สรุปให้หน่อย"
     results = await retrieve(q, Meta(department="ปลัดกระทรวงคมนาคม"))
     print(results)
 
