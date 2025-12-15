@@ -25,7 +25,7 @@ DB_CONFIG = {
     "port": 5432,
 }
 
-TABLE_NAME = "postgres"
+TABLE_NAME = "tors"
 CHUNK_SIZE = 350
 CHUNK_OVERLAP = 80
 EMBED_MODEL = "mxbai-embed-large"
@@ -35,7 +35,19 @@ CANDIDATE_MULT = 4
 ALPHA = 0.6
 NOT_FOUND_THRESHOLD = 0.12
 FILE_NAME = "tor1.pdf"
-
+METADATA = {
+    "title": "ขอบเขตของงาน (Terms of Reference : TOR จ้างบริการบำรุงรักษาและซ่อมแซมแก้ไขระบบงานอิเล็กทรอนิกส์",
+    "department": "ปลัดกระทรวงคมนาคม",
+    "year": 2024,
+    "source": "tor1.pdf"
+}
+# FILE_NAME = "tor2.pdf"
+# METADATA = {
+#     "title": "ขอบเขตของงาน (Terms Of Reference : TOR) เรื่อง จ้างพัฒนาระบบคลังข้อสอบและชุดข้อสอบเพื่อประเมินสมิทธิภาพทางภาษาอังกฤษ",
+#     "department": "มหาวิทยาลัยราชภัฏวไลยอลงกรณ",
+#     "year": 2024,
+#     "source": "tor2.pdf"
+# }
 
 # -----------------------------
 # Thai cleanup
@@ -52,24 +64,48 @@ def clean_thai_text(text: str) -> str:
     return text.strip()
 
 
+def thai_sentence_split(text: str):
+    # แบ่งโดยใช้ newline และ punctuation ไทย/สากล เป็นหลัก
+    # (ไม่ใช้ tokenizer ชั้นสูงเพื่อหลีกเลี่ยง dependency)
+    pieces = re.split(r'([\n]+|[।\.\?\!])+', text)
+    # รวมชิ้นที่เป็นเนื้อหา
+    out = []
+    buffer = ""
+    for p in pieces:
+        if not p:
+            continue
+        buffer += p
+        # ถ้าจบด้วยเครื่องหมายจบประโยคหรือ newline ให้เป็นประโยค
+        if re.search(r'[।\.\?\!]\s*$', p) or '\n' in p:
+            s = buffer.strip()
+            if s:
+                out.append(s)
+            buffer = ""
+    if buffer.strip():
+        out.append(buffer.strip())
+    return out
+
+
 # -----------------------------
 # Chunking
 # -----------------------------
-def extract_pdf(pdf_path: str):
+def extract_pdf(pdf_path: str) -> tuple[int, str]:
     reader = PdfReader(pdf_path)
     pages = []
-    for _, page in enumerate(reader.pages):
+    for pageno, page in enumerate(reader.pages):
         t = page.extract_text() or ""
         t = clean_thai_text(t)
-        pages.append(t)
-    return pages
+        pages.append((pageno, t))
+    return pages  # list of (page_number, text_of_page)
 
 
-def chunk_pages(pages):
+def chunk_texts(pages: list[str]):
     chunks = []
     chunk_id = 0
-    for text in pages:
-        words = text.split()
+    for pageno, text in pages:
+        sentences = thai_sentence_split(text)
+        # join sentences into windows of approx chunk_size words (word ~ token)
+        words = " ".join(sentences).split()
         i = 0
         while i < len(words):
             chunk_words = words[i: i + CHUNK_SIZE]
@@ -78,14 +114,14 @@ def chunk_pages(pages):
             if chunk_text:
                 chunks.append(
                     {
-                        "metadata": FILE_NAME,
-                        "content": chunk_text,
+                        "page": pageno,
+                        "metadata": METADATA,
+                        "text": chunk_text,
                     }
                 )
                 chunk_id += 1
 
             i += CHUNK_SIZE - CHUNK_OVERLAP
-    print(chunks)
     return chunks
 
 
@@ -122,14 +158,15 @@ async def ollama_generate(prompt: str, model=LLM_MODEL):
 # -----------------------------
 async def init_db(dim: int):
     conn = await asyncpg.connect(**DB_CONFIG)
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
     await conn.execute(
         f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         id SERIAL PRIMARY KEY,
-        content TEXT NOT NULL,
+        text TEXT NOT NULL,
         metadata JSONB,
         embedding VECTOR({dim})
-        created_at TIMESTAMP DEFAULT now()
     );
     """
     )
@@ -147,14 +184,13 @@ async def init_db(dim: int):
 async def insert_chunks(chunks, embeddings):
     conn = await asyncpg.connect(**DB_CONFIG)
     records = [
-        (c["file_name"], c["chunk_id"], c["text"], to_pgvector(emb))
+        (c["text"], json.dumps(c["metadata"]), to_pgvector(emb))
         for c, emb in zip(chunks, embeddings)
     ]
+
     await conn.executemany(
-        f"""INSERT INTO {TABLE_NAME} (file_name, chunk_id, text, embedding)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (chunk_id)
-            DO UPDATE SET file_name=EXCLUDED.file_name, text=EXCLUDED.text, embedding=EXCLUDED.embedding;""",
+        f"""INSERT INTO {TABLE_NAME} (text, metadata, embedding)
+            VALUES ($1, $2, $3);""",
         records,
     )
     await conn.close()
@@ -261,28 +297,32 @@ async def answer_question(question, top_chunks):
 # -----------------------------
 async def build_index(pdf_path):
     pages = extract_pdf(pdf_path)
-    chunks = chunk_pages(pages)
+    print(f"Loaded {len(pages)} pages")
+
+    chunks = chunk_texts(pages)
+    print(f"Created {len(chunks)} chunks")
+
 
     # determine embedding dim from first chunk
-    # emb0 = await ollama_embed(chunks[0]["text"])
-    # dim = len(emb0)
+    emb0 = await ollama_embed(chunks[0]["text"])
+    dim = len(emb0)
 
-    # await init_db(dim)
+    await init_db(dim)
 
     # embed chunks
-    # embeddings = []
-    # for c in chunks:
-    #     emb = await ollama_embed(c["text"])
-    #     embeddings.append(emb)
+    embeddings = []
+    for c in chunks:
+        emb = await ollama_embed(c["text"])
+        embeddings.append(emb)
 
-    # await insert_chunks(chunks, embeddings)
+    await insert_chunks(chunks, embeddings)
 
     # build TF-IDF
-    # texts = [c["text"] for c in chunks]
-    # tfidf_vec = TfidfVectorizer(ngram_range=(1, 2), max_features=20000)
-    # tfidf_mat = normalize(tfidf_vec.fit_transform(texts))
+    texts = [c["text"] for c in chunks]
+    tfidf_vec = TfidfVectorizer(ngram_range=(1, 2), max_features=20000)
+    tfidf_mat = normalize(tfidf_vec.fit_transform(texts))
 
-    # return chunks, texts, tfidf_vec, tfidf_mat
+    return chunks, texts, tfidf_vec, tfidf_mat
 
 
 def to_pgvector(vec):
@@ -293,9 +333,7 @@ def to_pgvector(vec):
 # MAIN
 # -----------------------------
 async def main():
-    await build_index(FILE_NAME)
-
-    # chunks, texts, tfidf_vec, tfidf_mat = await build_index(FILE_NAME)
+    chunks, texts, tfidf_vec, tfidf_mat = await build_index(FILE_NAME)
 
     # q = "สรุป TOR ของมหาวิทยาลัยราชภัฏวไลยอลงกร"
     # results = await retrieve(q, tfidf_vec, tfidf_mat, texts)
